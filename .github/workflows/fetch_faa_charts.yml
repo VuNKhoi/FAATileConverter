@@ -2,7 +2,7 @@ name: Fetch FAA Charts
 
 on:
   schedule:
-    - cron: '0 0 */3 * *'  # Every 3 days
+    - cron: '0 0 */2 * *'  # Every 2 days at midnight UTC
   workflow_dispatch:
 
 jobs:
