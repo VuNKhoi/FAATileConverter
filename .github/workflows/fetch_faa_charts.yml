@@ -1,0 +1,20 @@
+name: Fetch FAA Charts
+
+on:
+  schedule:
+    - cron: '0 0 */3 * *'  # Every 3 days
+  workflow_dispatch:
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: 3.11
+
+      - name: Run FAA Fetch Script
+        run: python scripts/fetch_faa_charts.py
