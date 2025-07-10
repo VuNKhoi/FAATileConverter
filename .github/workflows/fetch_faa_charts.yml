@@ -2,7 +2,9 @@ name: FAA Charts Download, Convert & Upload
 
 on:
   schedule:
-    - cron: '0 0 */2 * *'  # Every 2 days at midnight UTC
+    - cron: '0 6 * * 3'  # Every Wednesday at 06:00 UTC
+    - cron: '0 6 * * 4'  # Every Thursday at 06:00 UTC
+    - cron: '0 6 * * 5'  # Every Friday at 06:00 UTC
   workflow_dispatch:  # Manual trigger option
 
 jobs:
