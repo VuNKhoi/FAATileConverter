@@ -41,6 +41,11 @@ jobs:
       - name: Run download and unzip script
         run: python download_charts.py
 
+      - name: List downloaded files
+        run: |
+          echo "Downloaded files:"
+          find downloads -type f
+
       - name: Convert all GeoTIFFs to tiles
         run: |
           set -euo pipefail
@@ -51,7 +56,11 @@ jobs:
               [ -e "$tif" ] || continue
               echo "Converting $tif to tiles"
               outdir="${tif%.tif}_tiles"
-              gdal2tiles.py -z 5-12 -w none "$tif" "$outdir"
+              if gdal2tiles.py -z 5-12 -w none "$tif" "$outdir"; then
+                echo "Successfully converted $tif to $outdir"
+              else
+                echo "Failed to convert $tif" >&2
+              fi
             done
           done
 
@@ -61,7 +70,11 @@ jobs:
           for chart_type in sectional ifr_low ifr_high; do
             if [ -d "downloads/$chart_type" ]; then
               echo "Uploading $chart_type to S3"
-              aws s3 sync downloads/$chart_type s3://$S3_BUCKET/$chart_type --delete --only-show-errors
+              if aws s3 sync downloads/$chart_type s3://$S3_BUCKET/$chart_type --delete --only-show-errors; then
+                echo "Successfully uploaded $chart_type to S3"
+              else
+                echo "Failed to upload $chart_type to S3" >&2
+              fi
             else
               echo "No directory for $chart_type, skipping"
             fi
