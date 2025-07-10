@@ -10,10 +10,12 @@ on:
 jobs:
   download_convert_upload:
     runs-on: ubuntu-latest
-
+    defaults:
+      run:
+        working-directory: ${{ github.workspace }}/..
     env:
       AWS_DEFAULT_REGION: us-east-1
-      S3_BUCKET: lightore-faa-charts
+      S3_BUCKET: faa-converted-charts
 
     steps:
       - name: Checkout code
@@ -41,33 +43,13 @@ jobs:
         run: pip install awscli
 
       - name: Install Python packages
-        run: pip install -r requirements.txt
+        run: pip install -r FAATileConverter/requirements.txt
 
       - name: Run download and unzip script
-        run: python scripts/convert_faa_charts.py
-
-      - name: List downloaded files
-        run: |
-          echo "Downloaded files:"
-          find downloads -type f
+        run: python FAATileConverter/scripts/download_faa_charts.py
 
       - name: Convert all GeoTIFFs to tiles
-        run: |
-          set -euo pipefail
-          shopt -s globstar
-
-          for chart_type in sectional ifr_low ifr_high; do
-            for tif in downloads/$chart_type/**/*.tif; do
-              [ -e "$tif" ] || continue
-              echo "Converting $tif to tiles"
-              outdir="${tif%.tif}_tiles"
-              if gdal2tiles.py -z 5-12 -w none "$tif" "$outdir"; then
-                echo "Successfully converted $tif to $outdir"
-              else
-                echo "Failed to convert $tif" >&2
-              fi
-            done
-          done
+        run: python FAATileConverter/scripts/convert_faa_charts.py
 
       - name: Upload tiles to S3
         run: |
@@ -80,11 +62,15 @@ jobs:
               else
                 echo "Failed to upload $chart_type to S3" >&2
               fi
+              echo "\n\n"
             else
               echo "No directory for $chart_type, skipping"
+              echo "\n\n"
             fi
           done
         env:
+          # The following secrets are set in the GitHub repository settings and are valid in GitHub Actions runtime.
+          # Linter warning 'Context access might be invalid' can be safely ignored for these lines.
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
