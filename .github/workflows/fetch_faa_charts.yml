@@ -39,7 +39,7 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Run download and unzip script
-        run: python download_charts.py
+        run: python scripts/convert_faa_charts.py
 
       - name: List downloaded files
         run: |

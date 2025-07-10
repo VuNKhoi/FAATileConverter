@@ -7,7 +7,7 @@ from datetime import datetime
 
 # Constants
 BASE_DIR = os.path.dirname(__file__)
-DOWNLOAD_DIR = os.path.join(BASE_DIR, "..", "..", "charts")
+DOWNLOAD_DIR = os.path.join(BASE_DIR, "..", "..", "downloads")  # Changed from charts to downloads
 METADATA_PATH = os.path.join(BASE_DIR, "metadata", "faa_chart_log.json")
 
 def load_metadata():
