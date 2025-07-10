@@ -45,7 +45,7 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s globstar
-          
+
           for chart_type in sectional ifr_low ifr_high; do
             for tif in downloads/$chart_type/**/*.tif; do
               [ -e "$tif" ] || continue
@@ -69,3 +69,26 @@ jobs:
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+  notify_by_email:
+    needs: download_convert_upload
+    if: always()  # Run this even if previous job failed
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send email with job status
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 465
+          secure: true
+          username: ${{ secrets.EMAIL_USER }}
+          password: ${{ secrets.EMAIL_PASSWORD }}
+          subject: FAA Charts Job - ${{ needs.download_convert_upload.result }}
+          to: lightoreflight@gmail.com
+          from: GitHub Actions <lightoreflight@gmail.com>
+          body: |
+            FAA Charts workflow run completed with status: ${{ needs.download_convert_upload.result }}
+
+            Repository: ${{ github.repository }}
+            Workflow: ${{ github.workflow }}
+            Run URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
