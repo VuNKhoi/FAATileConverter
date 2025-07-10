@@ -1,20 +1,71 @@
-name: Fetch FAA Charts
+name: FAA Charts Download, Convert & Upload
 
 on:
   schedule:
     - cron: '0 0 */2 * *'  # Every 2 days at midnight UTC
-  workflow_dispatch:
+  workflow_dispatch:  # Manual trigger option
 
 jobs:
-  fetch:
+  download_convert_upload:
     runs-on: ubuntu-latest
+
+    env:
+      AWS_DEFAULT_REGION: us-east-1
+      S3_BUCKET: lightore-faa-charts
+
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout code
+        uses: actions/checkout@v3
 
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: 3.11
+          python-version: '3.x'
 
-      - name: Run FAA Fetch Script
-        run: python scripts/fetch_faa_charts.py
+      - name: Cache pip
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gdal-bin python3-gdal unzip awscli
+
+      - name: Install Python packages
+        run: pip install -r requirements.txt
+
+      - name: Run download and unzip script
+        run: python download_charts.py
+
+      - name: Convert all GeoTIFFs to tiles
+        run: |
+          set -euo pipefail
+          shopt -s globstar
+          
+          for chart_type in sectional ifr_low ifr_high; do
+            for tif in downloads/$chart_type/**/*.tif; do
+              [ -e "$tif" ] || continue
+              echo "Converting $tif to tiles"
+              outdir="${tif%.tif}_tiles"
+              gdal2tiles.py -z 5-12 -w none "$tif" "$outdir"
+            done
+          done
+
+      - name: Upload tiles to S3
+        run: |
+          set -euo pipefail
+          for chart_type in sectional ifr_low ifr_high; do
+            if [ -d "downloads/$chart_type" ]; then
+              echo "Uploading $chart_type to S3"
+              aws s3 sync downloads/$chart_type s3://$S3_BUCKET/$chart_type --delete --only-show-errors
+            else
+              echo "No directory for $chart_type, skipping"
+            fi
+          done
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
