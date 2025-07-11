@@ -76,43 +76,59 @@ def fetch_vfr_sectional_and_terminal_links(base_url):
 
 def fetch_ifr_low_high_links(base_url, allowed_prefixes):
     """
-    Fetch IFR chart links from the first tab (Enroute Lows, Highs, Areas),
-    including only allowed prefixes and skipping unwanted regions.
+    Fetch IFR chart links from tables on the FAA IFR page, including only allowed prefixes and skipping unwanted regions.
+    Returns a list of dicts: [{chart_code, published_date, url}]
     """
+    import re
     resp = requests.get(base_url)
     resp.raise_for_status()
     soup = BeautifulSoup(resp.text, 'html.parser')
-    links = []
-    # Always select the first .ui-tabs-panel (first tab content)
-    tab = soup.find('div', class_='ui-tabs-panel')
-    if not tab:
-        return links
-    for a_tag in tab.find_all('a', href=True):
-        href = a_tag['href']
-        if href.endswith('.zip'):
-            filename = href.split('/')[-1]
-            # Skip unwanted regions
-            if filename.startswith(IFR_SKIP_PREFIXES):
+    results = []
+    # Find all tables with IFR charts
+    for table in soup.find_all('table'):
+        for row in table.find_all('tr'):
+            cells = row.find_all('td')
+            if len(cells) < 2:
                 continue
-            # Only include allowed prefixes
-            if any(filename.startswith(prefix) for prefix in allowed_prefixes):
-                links.append(make_absolute_url(base_url, href))
-    return links
+            chart_code = cells[0].get_text(strip=True)
+            if not any(chart_code.startswith(prefix) for prefix in allowed_prefixes):
+                continue
+            if chart_code.startswith(IFR_SKIP_PREFIXES):
+                continue
+            # Extract published date from the second cell
+            published_date = None
+            date_match = re.search(r'([A-Z][a-z]{2} \d{1,2} \d{4})', cells[1].get_text())
+            if date_match:
+                try:
+                    published_date = datetime.strptime(date_match.group(1), '%b %d %Y').strftime('%Y-%m-%d')
+                except Exception:
+                    published_date = None
+            # Find GEO-TIFF .zip link in the second cell
+            for a_tag in cells[1].find_all('a', href=True):
+                link_text = a_tag.get_text(strip=True).lower()
+                href = a_tag['href']
+                if 'geo-tiff' in link_text and href.endswith('.zip'):
+                    results.append({
+                        'chart_code': chart_code,
+                        'published_date': published_date,
+                        'url': make_absolute_url(base_url, href)
+                    })
+    return results
 
 def download_file(url, dest_folder):
     os.makedirs(dest_folder, exist_ok=True)
     local_filename = os.path.join(dest_folder, url.split('/')[-1])
-    print(f"Downloading {local_filename}")
     with requests.get(url, stream=True) as r:
         r.raise_for_status()
         with open(local_filename, 'wb') as f:
             for chunk in r.iter_content(chunk_size=8192):
                 if chunk:
                     f.write(chunk)
+    print(f"Downloaded: {os.path.basename(local_filename)}")
     return local_filename
 
 def unzip_file(zip_path, extract_to):
-    print(f"Unzipping {zip_path} to {extract_to}")
+    print(f"Unzipped: {os.path.basename(zip_path)}")
     os.makedirs(extract_to, exist_ok=True)
     with zipfile.ZipFile(zip_path, 'r') as zip_ref:
         zip_ref.extractall(extract_to)
@@ -121,22 +137,31 @@ def process_chart_group(chart_type, url, allowed_prefixes, metadata):
     chart_dir = os.path.join(DOWNLOAD_DIR, chart_type)
     if chart_type == 'sectional':
         links = fetch_vfr_sectional_and_terminal_links(url)
+        link_tuples = [(None, None, l) for l in links]
     elif chart_type in ('ifr_low', 'ifr_high'):
-        links = fetch_ifr_low_high_links(url, allowed_prefixes)
+        link_dicts = fetch_ifr_low_high_links(url, allowed_prefixes)
+        link_tuples = [(d['chart_code'], d['published_date'], d['url']) for d in link_dicts]
     else:
         links = fetch_chart_links(url, allowed_prefixes)
-    print(f"Found {len(links)} links for {chart_type}.")
-    for link in links:
-        key = f"{chart_type}:{link}"
+        link_tuples = [(None, None, l) for l in links]
+    print(f"Found {len(link_tuples)} links for {chart_type}.")
+    # Pre-check: filter out already-processed charts before any download/convert
+    filtered_tuples = []
+    for chart_code, published_date, link in link_tuples:
+        key = f"{chart_type}:{chart_code or ''}:{published_date or ''}:{link}"
         if key in metadata and metadata[key].get("converted"):
-            print(f"Skipping {key} — already processed.")
+            print(f"Skipping {os.path.basename(link)} — already processed.")
             continue
-        print(f"Processing {key}...")
+        filtered_tuples.append((chart_code, published_date, link))
+    print(f"To process for {chart_type}: {len(filtered_tuples)} charts.")
+    for chart_code, published_date, link in filtered_tuples:
+        print(f"Processing {os.path.basename(link)}...")
         zip_path = download_file(link, chart_dir)
-        print(f"Downloaded: {zip_path}")
         unzip_file(zip_path, chart_dir)
-        metadata[key] = {
+        metadata[f"{chart_type}:{chart_code or ''}:{published_date or ''}:{link}"] = {
             "chart_type": chart_type,
+            "chart_code": chart_code,
+            "published_date": published_date,
             "url": link,
             "zip_file": os.path.basename(zip_path),
             "unzip_dir": chart_dir,
@@ -144,19 +169,3 @@ def process_chart_group(chart_type, url, allowed_prefixes, metadata):
             "converted": True
         }
     print("\n\n")  # Two empty lines after each category
-
-if __name__ == "__main__":
-    metadata = load_metadata()
-
-    # VFR Sectional and Terminal Area charts (only those tabs)
-    process_chart_group(
-        "sectional",
-        VFR_CHARTS_URL,
-        [""],  # allowed_prefixes not used for sectional now
-        metadata
-    )
-    # IFR Low (ELUS) and IFR High (EHUS) only
-    process_chart_group("ifr_low", IFR_CHARTS_URL, IFR_LOW_PREFIXES, metadata)
-    process_chart_group("ifr_high", IFR_CHARTS_URL, IFR_HIGH_PREFIXES, metadata)
-
-    save_metadata(metadata)
