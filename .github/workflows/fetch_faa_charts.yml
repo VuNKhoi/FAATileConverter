@@ -17,9 +17,6 @@ jobs:
       matrix:
         chart_type: [sectional, ifr_low, ifr_high]
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: FAATileConverter
     env:
       AWS_DEFAULT_REGION: us-east-1
       S3_BUCKET: faa-converted-charts
