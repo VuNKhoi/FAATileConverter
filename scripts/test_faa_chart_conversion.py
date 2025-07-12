@@ -1,0 +1,58 @@
+import os
+from download_faa_charts import (
+    VFR_CHARTS_URL, IFR_CHARTS_URL,
+    IFR_LOW_PREFIXES,
+    fetch_vfr_sectional_and_terminal_links, fetch_ifr_low_high_links,
+    download_file, unzip_file
+)
+import subprocess
+
+def test_download_and_convert_sectional():
+    print("Testing download and conversion of a VFR Sectional chart...")
+    links = fetch_vfr_sectional_and_terminal_links(VFR_CHARTS_URL)
+    if not links:
+        print("No VFR Sectional links found!")
+        return
+    url = links[0]
+    print(f"Downloading: {url}")
+    zip_path = download_file(url, "test_downloads/sectional")
+    unzip_file(zip_path, "test_downloads/sectional")
+    tif_files = [f for f in os.listdir("test_downloads/sectional") if f.lower().endswith('.tif')]
+    if not tif_files:
+        print("No .tif found after unzip!")
+        return
+    tif_path = os.path.join("test_downloads/sectional", tif_files[0])
+    tile_dir = tif_path + "_tiles"
+    print(f"Running gdal2tiles.py on {tif_path}")
+    subprocess.run(["gdal2tiles.py", "-z", "5-6", "-w", "none", tif_path, tile_dir], check=True)
+    if os.path.isdir(tile_dir):
+        print(f"Tiles created in {tile_dir}")
+    else:
+        print("gdal2tiles.py did not create tile directory!")
+
+def test_download_and_convert_ifr_low():
+    print("Testing download and conversion of an IFR Low chart...")
+    links = fetch_ifr_low_high_links(IFR_CHARTS_URL, IFR_LOW_PREFIXES)
+    if not links:
+        print("No IFR Low links found!")
+        return
+    url = links[0]['url']
+    print(f"Downloading: {url}")
+    zip_path = download_file(url, "test_downloads/ifr_low")
+    unzip_file(zip_path, "test_downloads/ifr_low")
+    tif_files = [f for f in os.listdir("test_downloads/ifr_low") if f.lower().endswith('.tif')]
+    if not tif_files:
+        print("No .tif found after unzip!")
+        return
+    tif_path = os.path.join("test_downloads/ifr_low", tif_files[0])
+    tile_dir = tif_path + "_tiles"
+    print(f"Running gdal2tiles.py on {tif_path}")
+    subprocess.run(["gdal2tiles.py", "-z", "5-6", "-w", "none", tif_path, tile_dir], check=True)
+    if os.path.isdir(tile_dir):
+        print(f"Tiles created in {tile_dir}")
+    else:
+        print("gdal2tiles.py did not create tile directory!")
+
+if __name__ == "__main__":
+    test_download_and_convert_sectional()
+    test_download_and_convert_ifr_low()

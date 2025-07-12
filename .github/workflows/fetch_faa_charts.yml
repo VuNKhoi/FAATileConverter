@@ -24,7 +24,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.x'
+          python-version: '3.11'
 
       - name: Cache pip
         uses: actions/cache@v3
@@ -39,8 +39,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gdal-bin python3-gdal unzip
 
-      - name: Install AWS CLI
-        run: pip install awscli
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_DEFAULT_REGION }}
 
       - name: Install Python packages
         run: pip install -r FAATileConverter/requirements.txt
@@ -54,31 +58,60 @@ jobs:
       - name: Upload tiles to S3
         run: |
           set -euo pipefail
+          echo "" > summary.txt
           for chart_type in sectional ifr_low ifr_high; do
             if [ -d "downloads/$chart_type" ]; then
               echo "Uploading $chart_type to S3"
               if aws s3 sync downloads/$chart_type s3://$S3_BUCKET/$chart_type --delete --only-show-errors; then
                 echo "Successfully uploaded $chart_type to S3"
+                echo "$chart_type uploaded" >> summary.txt
               else
                 echo "Failed to upload $chart_type to S3" >&2
+                echo "$chart_type FAILED" >> summary.txt
               fi
-              echo "\n\n"
+              echo ""
+              echo ""
             else
               echo "No directory for $chart_type, skipping"
-              echo "\n\n"
+              echo "$chart_type missing" >> summary.txt
+              echo ""
+              echo ""
             fi
           done
-        env:
-          # The following secrets are set in the GitHub repository settings and are valid in GitHub Actions runtime.
-          # Linter warning 'Context access might be invalid' can be safely ignored for these lines.
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        # summary.txt will be used for email notification
+
+      - name: Upload logs if failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: conversion-logs
+          path: logs/
+
+      - name: Upload summary artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: summary
+          path: summary.txt
 
   notify_by_email:
     needs: download_convert_upload
     if: always()  # Run this even if previous job failed
     runs-on: ubuntu-latest
     steps:
+      - name: Download summary artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: summary
+
+      - name: Read summary.txt
+        id: read_summary
+        run: |
+          SUMMARY_CONTENT="$(cat summary.txt)"
+          echo "summary<<EOF" >> $GITHUB_OUTPUT
+          echo "$SUMMARY_CONTENT" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
       - name: Send email with job status
         uses: dawidd6/action-send-mail@v3
         with:
@@ -96,3 +129,6 @@ jobs:
             Repository: ${{ github.repository }}
             Workflow: ${{ github.workflow }}
             Run URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+            Chart upload summary:
+            ${{ steps.read_summary.outputs.summary }}
