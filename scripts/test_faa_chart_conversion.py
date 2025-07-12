@@ -1,4 +1,5 @@
 import os
+import argparse
 from download_faa_charts import (
     VFR_CHARTS_URL, IFR_CHARTS_URL,
     IFR_LOW_PREFIXES,
@@ -53,6 +54,22 @@ def test_download_and_convert_ifr_low():
     else:
         print("gdal2tiles.py did not create tile directory!")
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Test FAA chart conversion.")
+    parser.add_argument('--chart-type', type=str, default=None, choices=['sectional', 'ifr_low', 'ifr_high'], help='Only test this chart type (for matrix jobs)')
+    return parser.parse_args()
+
+def main():
+    args = parse_args()
+    if args.chart_type == 'sectional':
+        test_download_and_convert_sectional()
+    elif args.chart_type == 'ifr_low':
+        test_download_and_convert_ifr_low()
+    elif args.chart_type == 'ifr_high':
+        print("IFR High chart testing not implemented.")
+    else:
+        test_download_and_convert_sectional()
+        test_download_and_convert_ifr_low()
+
 if __name__ == "__main__":
-    test_download_and_convert_sectional()
-    test_download_and_convert_ifr_low()
+    main()

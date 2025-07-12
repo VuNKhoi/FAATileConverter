@@ -1,6 +1,7 @@
 import sys
 import os
 import io
+import argparse
 # Clean up test results before running tests
 test_results_dir = os.path.join(os.path.dirname(__file__), 'test_results')
 for fname in os.listdir(test_results_dir):
@@ -38,12 +39,18 @@ def test_ifr():
         f.write(output.getvalue())
     print(output.getvalue(), end='')
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Test FAA chart extraction.")
+    parser.add_argument('--chart-type', type=str, default=None, choices=['sectional', 'ifr_low', 'ifr_high'], help='Only test this chart type (for matrix jobs)')
+    return parser.parse_args()
+
 def main():
-    if '--vfr' in sys.argv:
+    args = parse_args()
+    if args.chart_type == 'sectional' or args.chart_type is None:
         test_vfr()
-    if '--ifr' in sys.argv:
+    if args.chart_type == 'ifr_low' or args.chart_type == 'ifr_high' or args.chart_type is None:
         test_ifr()
-    if len(sys.argv) == 1:
+    if args.chart_type is None and len(sys.argv) == 1:
         print("Usage: python test_faa_chart_extraction.py [--vfr] [--ifr]")
 
 if __name__ == "__main__":

@@ -7,16 +7,23 @@ on:
     - cron: '0 6 * * 5'  # Every Friday at 06:00 UTC
   workflow_dispatch:  # Manual trigger option
 
+permissions:
+  contents: read
+  actions: read
+
 jobs:
   download_convert_upload:
+    strategy:
+      matrix:
+        chart_type: [sectional, ifr_low, ifr_high]
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: ${{ github.workspace }}/..
+        working-directory: FAATileConverter
     env:
       AWS_DEFAULT_REGION: us-east-1
       S3_BUCKET: faa-converted-charts
-
+      CHART_TYPE: ${{ matrix.chart_type }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
@@ -47,71 +54,74 @@ jobs:
           aws-region: ${{ env.AWS_DEFAULT_REGION }}
 
       - name: Install Python packages
-        run: pip install -r FAATileConverter/requirements.txt
+        run: pip install --no-cache-dir -r requirements.txt
 
       - name: Run download and unzip script
-        run: python FAATileConverter/scripts/download_faa_charts.py
+        run: python scripts/download_faa_charts.py --chart-type ${{ matrix.chart_type }}
 
       - name: Convert all GeoTIFFs to tiles
-        run: python FAATileConverter/scripts/convert_faa_charts.py
+        run: python scripts/convert_faa_charts.py --chart-type ${{ matrix.chart_type }}
 
       - name: Upload tiles to S3
         run: |
           set -euo pipefail
           echo "" > summary.txt
-          for chart_type in sectional ifr_low ifr_high; do
-            if [ -d "downloads/$chart_type" ]; then
-              echo "Uploading $chart_type to S3"
-              if aws s3 sync downloads/$chart_type s3://$S3_BUCKET/$chart_type --delete --only-show-errors; then
-                echo "Successfully uploaded $chart_type to S3"
-                echo "$chart_type uploaded" >> summary.txt
-              else
-                echo "Failed to upload $chart_type to S3" >&2
-                echo "$chart_type FAILED" >> summary.txt
-              fi
-              echo ""
-              echo ""
+          chart_type=${{ matrix.chart_type }}
+          if [ -d "downloads/$chart_type" ]; then
+            echo "Uploading $chart_type to S3"
+            if aws s3 sync downloads/$chart_type s3://$S3_BUCKET/$chart_type --delete --only-show-errors --exclude "*" --include "*.png" || { echo "Retrying upload..."; sleep 10; aws s3 sync downloads/$chart_type s3://$S3_BUCKET/$chart_type --delete --only-show-errors --exclude "*" --include "*.png"; }; then
+              echo "Successfully uploaded $chart_type to S3"
+              echo "$chart_type uploaded" >> summary.txt
             else
-              echo "No directory for $chart_type, skipping"
-              echo "$chart_type missing" >> summary.txt
-              echo ""
-              echo ""
+              echo "Failed to upload $chart_type to S3" >&2
+              echo "$chart_type FAILED" >> summary.txt
             fi
-          done
-        # summary.txt will be used for email notification
-
+            echo ""
+            echo ""
+          else
+            echo "No directory for $chart_type, skipping"
+            echo "$chart_type missing" >> summary.txt
+            echo ""
+            echo ""
+          fi
       - name: Upload logs if failure
         if: failure()
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
-          name: conversion-logs
+          name: conversion-logs-${{ matrix.chart_type }}
           path: logs/
-
       - name: Upload summary artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: summary
+          name: summary-${{ matrix.chart_type }}
           path: summary.txt
-
+          retention-days: 14
   notify_by_email:
     needs: download_convert_upload
-    if: always()  # Run this even if previous job failed
+    if: always()
     runs-on: ubuntu-latest
     steps:
-      - name: Download summary artifact
+      - name: Download summary artifacts
         uses: actions/download-artifact@v4
         with:
-          name: summary
-
-      - name: Read summary.txt
+          name: summary-sectional
+      - name: Download summary artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: summary-ifr_low
+      - name: Download summary artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: summary-ifr_high
+      - name: Read and combine summaries
         id: read_summary
         run: |
-          SUMMARY_CONTENT="$(cat summary.txt)"
+          cat summary.txt summary-sectional/summary.txt summary-ifr_low/summary.txt summary-ifr_high/summary.txt > all_summaries.txt
           echo "summary<<EOF" >> $GITHUB_OUTPUT
-          echo "$SUMMARY_CONTENT" >> $GITHUB_OUTPUT
+          cat all_summaries.txt >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
-
       - name: Send email with job status
         uses: dawidd6/action-send-mail@v3
         with:
@@ -132,3 +142,4 @@ jobs:
 
             Chart upload summary:
             ${{ steps.read_summary.outputs.summary }}
+          attachments: all_summaries.txt

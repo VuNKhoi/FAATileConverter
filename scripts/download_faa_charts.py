@@ -6,9 +6,15 @@ import json
 from datetime import datetime, timezone
 import time
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from tqdm import tqdm
+from typing import Dict, Any
+import shutil
+import argparse
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
+logger = logging.getLogger(__name__)
 
 # Constants
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
@@ -23,7 +29,7 @@ IFR_CHARTS_URL = "https://www.faa.gov/air_traffic/flight_info/aeronav/digital_pr
 IFR_LOW_PREFIXES = ["ELUS"]  # Enroute Low Altitude, Conterminous US
 IFR_HIGH_PREFIXES = ["EHUS"]  # Enroute High Altitude, Conterminous US
 IFR_SKIP_PREFIXES = (
-    'ELAK', 'EHAA', 'ELHI', 'EHPH', 'ELPA', 'EHPA', 'AREA', 'EHAK', 'EPHI', 'EHPH'
+    'ELAK', 'EHAA', 'ELHI', 'EHPH', 'ELPA', 'EHPA', 'AREA', 'EHAK', 'EPHI'  # Removed duplicate 'EHPH'
 )
 
 def load_metadata():
@@ -102,7 +108,7 @@ def download_file(url, dest_folder, retries=3, delay=5):
     os.makedirs(dest_folder, exist_ok=True)
     local_filename = os.path.join(dest_folder, url.split('/')[-1])
     if os.path.exists(local_filename):
-        logging.info(f"✅ Already exists, skipping download: {os.path.basename(local_filename)}")
+        logger.info(f"✅ Already exists, skipping download: {os.path.basename(local_filename)}")
         return local_filename
     for attempt in range(1, retries + 1):
         try:
@@ -112,10 +118,10 @@ def download_file(url, dest_folder, retries=3, delay=5):
                     for chunk in r.iter_content(chunk_size=8192):
                         if chunk:
                             f.write(chunk)
-            logging.info(f"⬇️ Downloaded: {os.path.basename(local_filename)}")
+            logger.info(f"⬇️ Downloaded: {os.path.basename(local_filename)}")
             return local_filename
         except Exception as e:
-            logging.warning(f"⚠️ Download failed (attempt {attempt}/{retries}) for {url}: {e}")
+            logger.warning(f"⚠️ Download failed (attempt {attempt}/{retries}) for {url}: {e}")
             if attempt < retries:
                 time.sleep(delay)
             else:
@@ -123,68 +129,100 @@ def download_file(url, dest_folder, retries=3, delay=5):
 
 def unzip_file(zip_path, extract_to):
     """Unzip a .zip file to the given directory. Removes the zip after extraction."""
-    logging.info(f"📦 Unzipping: {os.path.basename(zip_path)} to {extract_to}")
+    logger.info(f"📦 Unzipping: {os.path.basename(zip_path)} to {extract_to}")
     os.makedirs(extract_to, exist_ok=True)
     with zipfile.ZipFile(zip_path, 'r') as zip_ref:
         zip_ref.extractall(extract_to)
     try:
         os.remove(zip_path)
-        logging.info(f"🧹 Removed zip: {os.path.basename(zip_path)}")
+        logger.info(f"🧹 Removed zip: {os.path.basename(zip_path)}")
     except Exception as e:
-        logging.warning(f"⚠️ Could not remove zip {zip_path}: {e}")
+        logger.warning(f"⚠️ Could not remove zip {zip_path}: {e}")
 
-def process_vfr_charts(metadata):
-    """Download and extract VFR Sectional & Terminal charts."""
-    logging.info("🚩 Starting VFR Sectional & Terminal chart download...")
+def process_vfr_charts(metadata: Dict[str, Any]) -> Dict[str, Any]:
+    """Download and extract VFR Sectional & Terminal charts with progress bar and parallel downloads."""
+    logger.info("🚩 Starting VFR Sectional & Terminal chart download...")
     vfr_links = fetch_vfr_sectional_and_terminal_links(VFR_CHARTS_URL)
     vfr_dir = os.path.join(DOWNLOAD_DIR, 'sectional')
     os.makedirs(vfr_dir, exist_ok=True)
-    for url in vfr_links:
-        fname = os.path.basename(url)
-        if metadata.get('vfr', {}).get(fname):
-            logging.info(f"✅ [VFR] Already processed: {fname}")
-            continue
+    to_download = [(url, os.path.basename(url)) for url in vfr_links if not metadata.get('vfr', {}).get(os.path.basename(url))]
+    max_workers = min(4, os.cpu_count() or 1)
+    def vfr_task(url, fname):
         try:
             zip_path = download_file(url, vfr_dir)
             extract_path = os.path.join(vfr_dir, fname.replace('.zip', ''))
-            unzip_file(zip_path, extract_path)
-            metadata.setdefault('vfr', {})[fname] = {
-                'downloaded': True,
-                'timestamp': datetime.now(timezone.utc).isoformat()
-            }
-            save_metadata(metadata)
+            try:
+                unzip_file(zip_path, extract_path)
+            except Exception as e:
+                logger.error(f"❌ [VFR] Unzip failed: {fname}: {e}")
+                # Keep zip for retry
+                return (fname, False, f"Unzip failed: {e}")
+            return (fname, True, None)
         except Exception as e:
-            logging.error(f"❌ [VFR] Failed: {fname}: {e}")
+            return (fname, False, str(e))
+    results = []
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(vfr_task, url, fname): fname for url, fname in to_download}
+        for f in tqdm(as_completed(futures), total=len(futures), desc="VFR Charts", unit="file"):
+            fname, success, err = f.result()
+            if success:
+                metadata.setdefault('vfr', {})[fname] = {
+                    'downloaded': True,
+                    'timestamp': datetime.now(timezone.utc).isoformat()
+                }
+            else:
+                logger.error(f"❌ [VFR] Failed: {fname}: {err}")
+    # Backup metadata before saving
+    if os.path.exists(METADATA_PATH):
+        shutil.copy(METADATA_PATH, METADATA_PATH + '.bak')
+    save_metadata(metadata)
     return metadata
 
-def process_ifr_charts(metadata, chart_type, allowed_prefixes):
+
+def process_ifr_charts(metadata: Dict[str, Any], chart_type: str, allowed_prefixes) -> Dict[str, Any]:
     """
-    Download and extract IFR Low or High charts.
+    Download and extract IFR Low or High charts with progress bar and parallel downloads.
     chart_type: 'ifr_low' or 'ifr_high'
     allowed_prefixes: list of chart code prefixes
     """
-    logging.info(f"🚩 Starting {chart_type.upper()} chart download...")
+    logger.info(f"🚩 Starting {chart_type.upper()} chart download...")
     links = fetch_ifr_low_high_links(IFR_CHARTS_URL, allowed_prefixes)
     out_dir = os.path.join(DOWNLOAD_DIR, chart_type)
     os.makedirs(out_dir, exist_ok=True)
-    for entry in links:
-        fname = os.path.basename(entry['url'])
-        key = f"{entry['chart_code']}_{entry['published_date']}"
-        if metadata.get(chart_type, {}).get(key):
-            logging.info(f"✅ [{chart_type.upper()}] Already processed: {key}")
-            continue
+    to_download = [(entry['url'], entry['chart_code'], entry['published_date']) for entry in links if not metadata.get(chart_type, {}).get(f"{entry['chart_code']}_{entry['published_date']}")]
+    max_workers = min(4, os.cpu_count() or 1)
+    def ifr_task(url, chart_code, published_date):
+        fname = os.path.basename(url)
+        key = f"{chart_code}_{published_date}"
         try:
-            zip_path = download_file(entry['url'], out_dir)
+            zip_path = download_file(url, out_dir)
             extract_path = os.path.join(out_dir, key)
-            unzip_file(zip_path, extract_path)
-            metadata.setdefault(chart_type, {})[key] = {
-                'downloaded': True,
-                'published_date': entry['published_date'],
-                'timestamp': datetime.now(timezone.utc).isoformat()
-            }
-            save_metadata(metadata)
+            try:
+                unzip_file(zip_path, extract_path)
+            except Exception as e:
+                logger.error(f"❌ [{chart_type.upper()}] Unzip failed: {key}: {e}")
+                # Keep zip for retry
+                return (key, False, f"Unzip failed: {e}", published_date)
+            return (key, True, None, published_date)
         except Exception as e:
-            logging.error(f"❌ [{chart_type.upper()}] Failed: {key}: {e}")
+            return (key, False, str(e), published_date)
+    results = []
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(ifr_task, url, chart_code, published_date): (chart_code, published_date) for url, chart_code, published_date in to_download}
+        for f in tqdm(as_completed(futures), total=len(futures), desc=f"{chart_type.upper()} Charts", unit="file"):
+            key, success, err, published_date = f.result()
+            if success:
+                metadata.setdefault(chart_type, {})[key] = {
+                    'downloaded': True,
+                    'published_date': published_date,
+                    'timestamp': datetime.now(timezone.utc).isoformat()
+                }
+            else:
+                logger.error(f"❌ [{chart_type.upper()}] Failed: {key}: {err}")
+    # Backup metadata before saving
+    if os.path.exists(METADATA_PATH):
+        shutil.copy(METADATA_PATH, METADATA_PATH + '.bak')
+    save_metadata(metadata)
     return metadata
 
 def print_summary(metadata):
@@ -192,24 +230,35 @@ def print_summary(metadata):
     vfr_count = len(metadata.get('vfr', {}))
     ifr_low_count = len(metadata.get('ifr_low', {}))
     ifr_high_count = len(metadata.get('ifr_high', {}))
-    logging.info("\n🎉✅ Download and extraction complete.")
-    logging.info(f"  VFR charts processed: {vfr_count}")
-    logging.info(f"  IFR Low charts processed: {ifr_low_count}")
-    logging.info(f"  IFR High charts processed: {ifr_high_count}")
+    logger.info("\n🎉✅ Download and extraction complete.")
+    logger.info(f"  VFR charts processed: {vfr_count}")
+    logger.info(f"  IFR Low charts processed: {ifr_low_count}")
+    logger.info(f"  IFR High charts processed: {ifr_high_count}")
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Download and extract FAA charts.")
+    parser.add_argument('--chart-type', type=str, default=None, choices=['sectional', 'ifr_low', 'ifr_high'], help='Only process this chart type (for matrix jobs)')
+    return parser.parse_args()
 
 def main():
     """
-    Orchestrate the download and extraction workflow for all chart types.
+    Orchestrate the download and extraction workflow for all chart types or a single chart type.
     """
+    args = parse_args()
     metadata = load_metadata()
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-    # Process VFR charts
-    metadata = process_vfr_charts(metadata)
-    # Process IFR Low charts
-    metadata = process_ifr_charts(metadata, 'ifr_low', IFR_LOW_PREFIXES)
-    # Process IFR High charts
-    metadata = process_ifr_charts(metadata, 'ifr_high', IFR_HIGH_PREFIXES)
-    # Print summary
+    if args.chart_type:
+        if args.chart_type == 'sectional':
+            metadata = process_vfr_charts(metadata)
+        elif args.chart_type == 'ifr_low':
+            metadata = process_ifr_charts(metadata, 'ifr_low', IFR_LOW_PREFIXES)
+        elif args.chart_type == 'ifr_high':
+            metadata = process_ifr_charts(metadata, 'ifr_high', IFR_HIGH_PREFIXES)
+    else:
+        # Process all chart types
+        metadata = process_vfr_charts(metadata)
+        metadata = process_ifr_charts(metadata, 'ifr_low', IFR_LOW_PREFIXES)
+        metadata = process_ifr_charts(metadata, 'ifr_high', IFR_HIGH_PREFIXES)
     print_summary(metadata)
 
 if __name__ == "__main__":
