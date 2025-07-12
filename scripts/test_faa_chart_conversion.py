@@ -1,5 +1,6 @@
 import os
 import argparse
+import shutil
 from download_faa_charts import (
     VFR_CHARTS_URL, IFR_CHARTS_URL,
     IFR_LOW_PREFIXES,
@@ -9,6 +10,9 @@ from download_faa_charts import (
 import subprocess
 
 def test_download_and_convert_sectional():
+    # Clean up previous test output
+    if os.path.exists("test_downloads/sectional"):
+        shutil.rmtree("test_downloads/sectional")
     print("Testing download and conversion of a VFR Sectional chart...")
     links = fetch_vfr_sectional_and_terminal_links(VFR_CHARTS_URL)
     if not links:
@@ -25,13 +29,16 @@ def test_download_and_convert_sectional():
     tif_path = os.path.join("test_downloads/sectional", tif_files[0])
     tile_dir = tif_path + "_tiles"
     print(f"Running gdal2tiles.py on {tif_path}")
-    subprocess.run(["gdal2tiles.py", "-z", "5-6", "-w", "none", tif_path, tile_dir], check=True)
+    subprocess.run(["gdal2tiles.py", "-z", "5-12", "-w", "none", tif_path, tile_dir], check=True)
     if os.path.isdir(tile_dir):
         print(f"Tiles created in {tile_dir}")
     else:
         print("gdal2tiles.py did not create tile directory!")
 
 def test_download_and_convert_ifr_low():
+    # Clean up previous test output
+    if os.path.exists("test_downloads/ifr_low"):
+        shutil.rmtree("test_downloads/ifr_low")
     print("Testing download and conversion of an IFR Low chart...")
     links = fetch_ifr_low_high_links(IFR_CHARTS_URL, IFR_LOW_PREFIXES)
     if not links:
@@ -48,7 +55,7 @@ def test_download_and_convert_ifr_low():
     tif_path = os.path.join("test_downloads/ifr_low", tif_files[0])
     tile_dir = tif_path + "_tiles"
     print(f"Running gdal2tiles.py on {tif_path}")
-    subprocess.run(["gdal2tiles.py", "-z", "5-6", "-w", "none", tif_path, tile_dir], check=True)
+    subprocess.run(["gdal2tiles.py", "-z", "5-12", "-w", "none", tif_path, tile_dir], check=True)
     if os.path.isdir(tile_dir):
         print(f"Tiles created in {tile_dir}")
     else:

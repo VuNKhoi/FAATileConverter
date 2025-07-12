@@ -11,7 +11,7 @@ from tqdm import tqdm
 from typing import Dict, Any
 import shutil
 import argparse
-from .utils import download_and_extract_zip, backup_and_save_metadata
+from utils import download_and_extract_zip, backup_and_save_metadata
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')

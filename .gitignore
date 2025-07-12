@@ -1,2 +1,4 @@
 # Ignore test results
 scripts/test_results/
+# Ignore test downloads
+test_downloads/
