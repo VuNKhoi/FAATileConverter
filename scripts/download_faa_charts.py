@@ -11,6 +11,7 @@ from tqdm import tqdm
 from typing import Dict, Any
 import shutil
 import argparse
+from .utils import download_and_extract_zip, backup_and_save_metadata
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
@@ -148,18 +149,9 @@ def process_vfr_charts(metadata: Dict[str, Any]) -> Dict[str, Any]:
     to_download = [(url, os.path.basename(url)) for url in vfr_links if not metadata.get('vfr', {}).get(os.path.basename(url))]
     max_workers = min(4, os.cpu_count() or 1)
     def vfr_task(url, fname):
-        try:
-            zip_path = download_file(url, vfr_dir)
-            extract_path = os.path.join(vfr_dir, fname.replace('.zip', ''))
-            try:
-                unzip_file(zip_path, extract_path)
-            except Exception as e:
-                logger.error(f"❌ [VFR] Unzip failed: {fname}: {e}")
-                # Keep zip for retry
-                return (fname, False, f"Unzip failed: {e}")
-            return (fname, True, None)
-        except Exception as e:
-            return (fname, False, str(e))
+        extract_path = os.path.join(vfr_dir, fname.replace('.zip', ''))
+        success, err = download_and_extract_zip(url, vfr_dir, extract_path, download_file, unzip_file)
+        return (fname, success, err)
     results = []
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(vfr_task, url, fname): fname for url, fname in to_download}
@@ -172,10 +164,7 @@ def process_vfr_charts(metadata: Dict[str, Any]) -> Dict[str, Any]:
                 }
             else:
                 logger.error(f"❌ [VFR] Failed: {fname}: {err}")
-    # Backup metadata before saving
-    if os.path.exists(METADATA_PATH):
-        shutil.copy(METADATA_PATH, METADATA_PATH + '.bak')
-    save_metadata(metadata)
+    backup_and_save_metadata(metadata, METADATA_PATH)
     return metadata
 
 
@@ -194,18 +183,9 @@ def process_ifr_charts(metadata: Dict[str, Any], chart_type: str, allowed_prefix
     def ifr_task(url, chart_code, published_date):
         fname = os.path.basename(url)
         key = f"{chart_code}_{published_date}"
-        try:
-            zip_path = download_file(url, out_dir)
-            extract_path = os.path.join(out_dir, key)
-            try:
-                unzip_file(zip_path, extract_path)
-            except Exception as e:
-                logger.error(f"❌ [{chart_type.upper()}] Unzip failed: {key}: {e}")
-                # Keep zip for retry
-                return (key, False, f"Unzip failed: {e}", published_date)
-            return (key, True, None, published_date)
-        except Exception as e:
-            return (key, False, str(e), published_date)
+        extract_path = os.path.join(out_dir, key)
+        success, err = download_and_extract_zip(url, out_dir, extract_path, download_file, unzip_file)
+        return (key, success, err, published_date)
     results = []
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(ifr_task, url, chart_code, published_date): (chart_code, published_date) for url, chart_code, published_date in to_download}
@@ -219,10 +199,7 @@ def process_ifr_charts(metadata: Dict[str, Any], chart_type: str, allowed_prefix
                 }
             else:
                 logger.error(f"❌ [{chart_type.upper()}] Failed: {key}: {err}")
-    # Backup metadata before saving
-    if os.path.exists(METADATA_PATH):
-        shutil.copy(METADATA_PATH, METADATA_PATH + '.bak')
-    save_metadata(metadata)
+    backup_and_save_metadata(metadata, METADATA_PATH)
     return metadata
 
 def print_summary(metadata):
