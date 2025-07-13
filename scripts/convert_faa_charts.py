@@ -169,6 +169,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--workers', type=int, default=None, help='Number of parallel workers (default: 4)')
     parser.add_argument('--keep-vrt', action='store_true', help='Keep .vrt files after conversion (for debugging)')
     parser.add_argument('--chart-type', type=str, default=None, choices=['sectional', 'ifr_low', 'ifr_high'], help='Only process this chart type (for matrix jobs)')
+    parser.add_argument('--single-tiff', type=str, help='Convert a single TIFF file and exit')
     return parser.parse_args()
 
 
@@ -186,6 +187,16 @@ def get_workers_from_env_or_args(args: argparse.Namespace) -> int:
     return args.workers or int(os.environ.get("FAA_TILE_WORKERS", 4))
 
 
+def convert_single_tiff(tiff_path, zoom="5-12", keep_vrt=False, metadata=None):
+    """Convert a single TIFF file to tiles and update metadata if provided."""
+    file_name, metadata_update, success = convert_tiff(tiff_path, zoom, keep_vrt)
+    if metadata is not None and success and metadata_update:
+        metadata.setdefault('converted', {})[file_name] = metadata_update
+        backup_and_save_metadata(metadata, METADATA_PATH)
+    if not success:
+        logging.error(f"❌ Failed to convert {file_name}")
+    return success
+
 def process_all_tiffs(tiff_files: List[str], metadata: Dict[str, Dict], zoom: str, workers: int, keep_vrt: bool = False) -> List[str]:
     """
     Process all TIFFs in parallel, return a list of files that failed to convert.
@@ -195,22 +206,13 @@ def process_all_tiffs(tiff_files: List[str], metadata: Dict[str, Dict], zoom: st
     failed = []
     already_converted = set(metadata.get('converted', {}).keys())
     jobs = [tiff_path for tiff_path in tiff_files if os.path.basename(tiff_path) not in already_converted]
+    def tiff_task(tiff_path):
+        success = convert_single_tiff(tiff_path, zoom, keep_vrt, metadata)
+        if not success:
+            failed.append(os.path.basename(tiff_path))
+        return success
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        future_to_tiff = {executor.submit(convert_tiff, tiff_path, zoom, keep_vrt): tiff_path for tiff_path in jobs}
-        with tqdm(total=len(jobs), desc="Converting TIFFs", unit="file") as pbar:
-            for future in as_completed(future_to_tiff):
-                tiff_path = future_to_tiff[future]
-                file_name = os.path.basename(tiff_path)
-                try:
-                    file_name, metadata_update, success = future.result()
-                    if success and metadata_update:
-                        metadata.setdefault('converted', {})[file_name] = metadata_update
-                    elif not success:
-                        failed.append(file_name)
-                except Exception as e:
-                    logging.error(f"❌ Exception during conversion of {file_name}: {e}")
-                    failed.append(file_name)
-                pbar.update(1)
+        list(tqdm(executor.map(tiff_task, jobs), total=len(jobs), desc="Converting TIFFs", unit="file"))
     return failed
 
 
@@ -252,6 +254,21 @@ def main() -> None:
         metadata = {}
 
     args = parse_args()
+    # Add CLI for single-file conversion
+    import sys
+    if args.single_tiff:
+        tiff_path = args.single_tiff
+        zoom = args.zoom or "5-12"
+        keep_vrt = args.keep_vrt
+        # Load metadata if needed
+        if METADATA_PATH.exists():
+            with open(METADATA_PATH, 'r') as f:
+                metadata = json.load(f)
+        else:
+            metadata = {}
+        success = convert_single_tiff(tiff_path, zoom, keep_vrt, metadata)
+        print(f"Single TIFF conversion {'succeeded' if success else 'failed'} for {tiff_path}")
+        exit(0)
     # Only process TIFFs for the specified chart type if given
     if args.chart_type:
         tiff_files = []

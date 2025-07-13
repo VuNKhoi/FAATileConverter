@@ -146,27 +146,18 @@ def process_vfr_charts(metadata: Dict[str, Any]) -> Dict[str, Any]:
     vfr_links = fetch_vfr_sectional_and_terminal_links(VFR_CHARTS_URL)
     vfr_dir = os.path.join(DOWNLOAD_DIR, 'sectional')
     os.makedirs(vfr_dir, exist_ok=True)
-    to_download = [(url, os.path.basename(url)) for url in vfr_links if not metadata.get('vfr', {}).get(os.path.basename(url))]
+    to_download = [url for url in vfr_links if not metadata.get('vfr', {}).get(os.path.basename(url))]
     max_workers = min(4, os.cpu_count() or 1)
-    def vfr_task(url, fname):
-        extract_path = os.path.join(vfr_dir, fname.replace('.zip', ''))
-        success, err = download_and_extract_zip(url, vfr_dir, extract_path, download_file, unzip_file)
-        return (fname, success, err)
-    results = []
+    def vfr_task(url):
+        success, err = download_and_extract_single_vfr(url, metadata)
+        fname = os.path.basename(url)
+        if not success:
+            logger.error(f"❌ [VFR] Failed: {fname}: {err}")
+        return success
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(vfr_task, url, fname): fname for url, fname in to_download}
-        for f in tqdm(as_completed(futures), total=len(futures), desc="VFR Charts", unit="file"):
-            fname, success, err = f.result()
-            if success:
-                metadata.setdefault('vfr', {})[fname] = {
-                    'downloaded': True,
-                    'timestamp': datetime.now(timezone.utc).isoformat()
-                }
-            else:
-                logger.error(f"❌ [VFR] Failed: {fname}: {err}")
+        list(tqdm(executor.map(vfr_task, to_download), total=len(to_download), desc="VFR Charts", unit="file"))
     backup_and_save_metadata(metadata, METADATA_PATH)
     return metadata
-
 
 def process_ifr_charts(metadata: Dict[str, Any], chart_type: str, allowed_prefixes) -> Dict[str, Any]:
     """
@@ -178,27 +169,16 @@ def process_ifr_charts(metadata: Dict[str, Any], chart_type: str, allowed_prefix
     links = fetch_ifr_low_high_links(IFR_CHARTS_URL, allowed_prefixes)
     out_dir = os.path.join(DOWNLOAD_DIR, chart_type)
     os.makedirs(out_dir, exist_ok=True)
-    to_download = [(entry['url'], entry['chart_code'], entry['published_date']) for entry in links if not metadata.get(chart_type, {}).get(f"{entry['chart_code']}_{entry['published_date']}")]
+    to_download = [entry for entry in links if not metadata.get(chart_type, {}).get(f"{entry['chart_code']}_{entry['published_date']}")]
     max_workers = min(4, os.cpu_count() or 1)
-    def ifr_task(url, chart_code, published_date):
-        fname = os.path.basename(url)
-        key = f"{chart_code}_{published_date}"
-        extract_path = os.path.join(out_dir, key)
-        success, err = download_and_extract_zip(url, out_dir, extract_path, download_file, unzip_file)
-        return (key, success, err, published_date)
-    results = []
+    def ifr_task(entry):
+        success, err = download_and_extract_single_ifr(entry, chart_type, metadata)
+        key = f"{entry['chart_code']}_{entry['published_date']}"
+        if not success:
+            logger.error(f"❌ [{chart_type.upper()}] Failed: {key}: {err}")
+        return success
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(ifr_task, url, chart_code, published_date): (chart_code, published_date) for url, chart_code, published_date in to_download}
-        for f in tqdm(as_completed(futures), total=len(futures), desc=f"{chart_type.upper()} Charts", unit="file"):
-            key, success, err, published_date = f.result()
-            if success:
-                metadata.setdefault(chart_type, {})[key] = {
-                    'downloaded': True,
-                    'published_date': published_date,
-                    'timestamp': datetime.now(timezone.utc).isoformat()
-                }
-            else:
-                logger.error(f"❌ [{chart_type.upper()}] Failed: {key}: {err}")
+        list(tqdm(executor.map(ifr_task, to_download), total=len(to_download), desc=f"{chart_type.upper()} Charts", unit="file"))
     backup_and_save_metadata(metadata, METADATA_PATH)
     return metadata
 
@@ -237,6 +217,47 @@ def main():
         metadata = process_ifr_charts(metadata, 'ifr_low', IFR_LOW_PREFIXES)
         metadata = process_ifr_charts(metadata, 'ifr_high', IFR_HIGH_PREFIXES)
     print_summary(metadata)
+
+def download_and_extract_single_vfr(url, metadata=None):
+    """Download and extract a single VFR chart zip file."""
+    vfr_dir = os.path.join(DOWNLOAD_DIR, 'sectional')
+    fname = os.path.basename(url)
+    extract_path = os.path.join(vfr_dir, fname.replace('.zip', ''))
+    success, err = download_and_extract_zip(url, vfr_dir, extract_path, download_file, unzip_file)
+    if metadata is not None and success:
+        metadata.setdefault('vfr', {})[fname] = {
+            'downloaded': True,
+            'timestamp': datetime.now(timezone.utc).isoformat()
+        }
+        backup_and_save_metadata(metadata, METADATA_PATH)
+    return success, err
+
+def download_and_extract_single_ifr(entry, chart_type, metadata=None):
+    """Download and extract a single IFR chart zip file (entry from fetch_ifr_low_high_links)."""
+    out_dir = os.path.join(DOWNLOAD_DIR, chart_type)
+    key = f"{entry['chart_code']}_{entry['published_date']}"
+    fname = os.path.basename(entry['url'])
+    extract_path = os.path.join(out_dir, key)
+    success, err = download_and_extract_zip(entry['url'], out_dir, extract_path, download_file, unzip_file)
+    if metadata is not None and success:
+        metadata.setdefault(chart_type, {})[key] = {
+            'downloaded': True,
+            'published_date': entry['published_date'],
+            'timestamp': datetime.now(timezone.utc).isoformat()
+        }
+        backup_and_save_metadata(metadata, METADATA_PATH)
+    return success, err
+
+def get_first_vfr_url():
+    """Get the first VFR chart .zip URL for testing."""
+    links = fetch_vfr_sectional_and_terminal_links(VFR_CHARTS_URL)
+    return links[0] if links else None
+
+def get_first_ifr_entry(chart_type):
+    """Get the first IFR chart entry for the given type ('ifr_low' or 'ifr_high')."""
+    prefixes = IFR_LOW_PREFIXES if chart_type == 'ifr_low' else IFR_HIGH_PREFIXES
+    entries = fetch_ifr_low_high_links(IFR_CHARTS_URL, prefixes)
+    return entries[0] if entries else None
 
 if __name__ == "__main__":
     main()
