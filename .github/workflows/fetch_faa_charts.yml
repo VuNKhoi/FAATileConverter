@@ -54,19 +54,49 @@ jobs:
       - name: Install Python packages
         run: pip install --no-cache-dir -r requirements.txt
 
+      - name: Check if chart is current (marker file check)
+        id: check_current
+        run: |
+          chart_type=${{ matrix.chart_type }}
+          marker_file="downloads/$chart_type/.current_marker"
+          # Simulate marker check: replace with your actual logic or script
+          if [ -f "$marker_file" ]; then
+            echo "Marker file exists for $chart_type. Checking if current..."
+            # Replace this with your actual staleness check logic
+            if grep -q 'current' "$marker_file"; then
+              echo "Chart $chart_type is current. Skipping download, convert, and upload."
+              echo "current=true" >> $GITHUB_OUTPUT
+              exit 0
+            else
+              echo "Chart $chart_type is obsolete. Proceeding."
+              echo "current=false" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "No marker file for $chart_type. Proceeding."
+            echo "current=false" >> $GITHUB_OUTPUT
+          fi
+
       - name: Run download and unzip script
+        if: steps.check_current.outputs.current != 'true'
         run: python scripts/download_faa_charts.py --chart-type ${{ matrix.chart_type }} --check-current
 
       - name: Convert all GeoTIFFs to tiles
+        if: steps.check_current.outputs.current != 'true'
         run: python scripts/convert_faa_charts.py --chart-type ${{ matrix.chart_type }}
 
       - name: Delete old tiles from S3
+        if: steps.check_current.outputs.current != 'true'
         run: |
           chart_type=${{ matrix.chart_type }}
-          echo "Deleting old tiles for $chart_type from S3"
-          aws s3 rm s3://$S3_BUCKET/$chart_type --recursive --only-show-errors
+          if [ -d "downloads/$chart_type" ]; then
+            echo "Deleting old tiles for $chart_type from S3"
+            aws s3 rm s3://$S3_BUCKET/$chart_type --recursive --only-show-errors
+          else
+            echo "No local directory for $chart_type, skipping S3 delete."
+          fi
 
       - name: Upload tiles to S3
+        if: steps.check_current.outputs.current != 'true'
         run: |
           set -euo pipefail
           echo "" > summary.txt
@@ -104,6 +134,17 @@ jobs:
             echo "$chart_type missing" >> summary.txt
             echo ""
             echo ""
+          fi
+      - name: Check S3 Cache-Control header
+        if: steps.check_current.outputs.current != 'true'
+        run: |
+          chart_type=${{ matrix.chart_type }}
+          TILE_DIR=downloads/$chart_type
+          if [ -d "$TILE_DIR" ]; then
+            pip install boto3 botocore
+            python scripts/test_cache_control.py "$S3_BUCKET" "$chart_type" "$TILE_DIR"
+          else
+            echo "No tile directory found for cache-control check."
           fi
       - name: Upload logs if failure
         if: failure()
