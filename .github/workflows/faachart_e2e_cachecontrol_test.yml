@@ -1,0 +1,99 @@
+name: FAA Chart E2E Cache-Control Test
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'scripts/download_faa_charts.py'
+      - 'scripts/convert_faa_charts.py'
+      - 'scripts/utils.py'
+      - '.github/workflows/faachart_e2e_cachecontrol_test.yml'
+      - 'requirements.txt'
+
+jobs:
+  minimal-e2e-cachecontrol:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - chart_type: sectional
+            chart_code: SEA
+          - chart_type: ifr_low
+            chart_code: ELUS1
+          - chart_type: ifr_high
+            chart_code: EHUS1
+    env:
+      AWS_DEFAULT_REGION: us-east-1
+      S3_BUCKET: faa-converted-charts-test
+      CHART_TYPE: ${{ matrix.chart_type }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Print matrix values (debug)
+        run: |
+          echo "chart_type: ${{ matrix.chart_type }}"
+          echo "chart_code: ${{ matrix.chart_code }}"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gdal-bin python3-gdal unzip
+
+      - name: Install Python packages
+        run: pip install --no-cache-dir -r requirements.txt
+
+      - name: Download and extract one chart (with current check)
+        run: |
+          python scripts/faachart_minimal_e2e.py ${{ matrix.chart_type }} ${{ matrix.chart_code }} --check-current
+
+      - name: Find single TIFF for conversion
+        id: find_tiff
+        run: |
+          CHART_DIR=${{ github.workspace }}/../downloads/${{ matrix.chart_type }}
+          TIFF=$(find "$CHART_DIR" -type f \( -iname '*.tif' -o -iname '*.tiff' \) | head -n 1)
+          echo "tiff_path=$TIFF" >> $GITHUB_OUTPUT
+
+      - name: Convert single TIFF to tiles
+        run: |
+          python scripts/convert_faa_charts.py --single-tiff "${{ steps.find_tiff.outputs.tiff_path }}"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_DEFAULT_REGION }}
+
+      - name: Upload single chart tiles to S3
+        run: |
+          CHART_DIR=${{ github.workspace }}/../downloads/${{ matrix.chart_type }}
+          TILE_DIR=$(find "$CHART_DIR" -type d -name '*_tiles' | head -n 1)
+          if [ -d "$TILE_DIR" ]; then
+            aws s3 sync \
+              "$TILE_DIR" \
+              s3://$S3_BUCKET/${{ matrix.chart_type }}/$(basename "$TILE_DIR") \
+              --delete \
+              --only-show-errors \
+              --exclude "*" \
+              --include "*.png" \
+              --cache-control "public, max-age=31536000, immutable"
+          else
+            echo "No tile directory found for upload."
+          fi
+
+      - name: Check S3 Cache-Control header
+        run: |
+          CHART_DIR=${{ github.workspace }}/../downloads/${{ matrix.chart_type }}
+          TILE_DIR=$(find "$CHART_DIR" -type d -name '*_tiles' | head -n 1)
+          if [ -d "$TILE_DIR" ]; then
+            pip install boto3
+            python scripts/test_cache_control.py "$S3_BUCKET" "${{ matrix.chart_type }}/$(basename \"$TILE_DIR\")" "$TILE_DIR"
+          else
+            echo "No tile directory found for cache-control check."
+          fi

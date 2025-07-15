@@ -11,7 +11,7 @@ from tqdm import tqdm
 from typing import Dict, Any
 import shutil
 import argparse
-from utils import download_and_extract_zip, backup_and_save_metadata
+from scripts.utils import download_and_extract_zip, backup_and_save_metadata
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
@@ -34,14 +34,19 @@ IFR_SKIP_PREFIXES = (
 )
 
 def load_metadata():
-    """Load chart processing metadata from JSON file."""
+    """Load chart processing metadata from JSON file. Handles missing or corrupt files gracefully."""
     if os.path.exists(METADATA_PATH):
-        with open(METADATA_PATH, "r") as f:
-            return json.load(f)
+        try:
+            with open(METADATA_PATH, "r") as f:
+                return json.load(f)
+        except Exception as e:
+            logger.warning(f"Failed to load metadata (corrupt?): {e}. Returning empty metadata.")
+            return {}
     return {}
 
 def save_metadata(data):
     """Save chart processing metadata to JSON file."""
+    os.makedirs(os.path.dirname(METADATA_PATH), exist_ok=True)
     with open(METADATA_PATH, "w") as f:
         json.dump(data, f, indent=2)
 
@@ -55,13 +60,22 @@ def make_absolute_url(base_url, href):
 
 def fetch_vfr_sectional_and_terminal_links(base_url):
     """Extract VFR Sectional and Terminal Area chart .zip links from the FAA VFR page."""
-    resp = requests.get(base_url)
-    resp.raise_for_status()
-    soup = BeautifulSoup(resp.text, 'html.parser')
+    try:
+        resp = requests.get(base_url)
+        resp.raise_for_status()
+    except Exception as e:
+        logger.error(f"Failed to fetch VFR page: {base_url}: {e}")
+        return []
+    try:
+        soup = BeautifulSoup(resp.text, 'html.parser')
+    except Exception as e:
+        logger.error(f"Failed to parse VFR page HTML: {e}")
+        return []
     links = []
     for tab_id in ['sectional', 'terminalArea']:
         tab = soup.find('div', id=tab_id)
         if not tab:
+            logger.warning(f"Tab {tab_id} not found in VFR page.")
             continue
         for a_tag in tab.find_all('a', href=True):
             href = a_tag['href']
@@ -72,9 +86,17 @@ def fetch_vfr_sectional_and_terminal_links(base_url):
 def fetch_ifr_low_high_links(base_url, allowed_prefixes):
     """Extract IFR Low/High chart links from FAA IFR page tables, matching allowed prefixes."""
     import re
-    resp = requests.get(base_url)
-    resp.raise_for_status()
-    soup = BeautifulSoup(resp.text, 'html.parser')
+    try:
+        resp = requests.get(base_url)
+        resp.raise_for_status()
+    except Exception as e:
+        logger.error(f"Failed to fetch IFR page: {base_url}: {e}")
+        return []
+    try:
+        soup = BeautifulSoup(resp.text, 'html.parser')
+    except Exception as e:
+        logger.error(f"Failed to parse IFR page HTML: {e}")
+        return []
     results = []
     for table in soup.find_all('table'):
         for row in table.find_all('tr'):
@@ -91,7 +113,8 @@ def fetch_ifr_low_high_links(base_url, allowed_prefixes):
             if date_match:
                 try:
                     published_date = datetime.strptime(date_match.group(1), '%b %d %Y').strftime('%Y-%m-%d')
-                except Exception:
+                except Exception as e:
+                    logger.warning(f"Failed to parse published date for {chart_code}: {e}")
                     published_date = None
             for a_tag in cells[1].find_all('a', href=True):
                 link_text = a_tag.get_text(strip=True).lower()
@@ -130,23 +153,42 @@ def download_file(url, dest_folder, retries=3, delay=5):
 
 def unzip_file(zip_path, extract_to):
     """Unzip a .zip file to the given directory. Removes the zip after extraction."""
-    logger.info(f"📦 Unzipping: {os.path.basename(zip_path)} to {extract_to}")
+    logger.info(f"\U0001F4E6 Unzipping: {os.path.basename(zip_path)} to {extract_to}")
     os.makedirs(extract_to, exist_ok=True)
-    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-        zip_ref.extractall(extract_to)
+    try:
+        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+            zip_ref.extractall(extract_to)
+    except Exception as e:
+        logger.error(f"Failed to unzip {zip_path}: {e}")
+        return
     try:
         os.remove(zip_path)
-        logger.info(f"🧹 Removed zip: {os.path.basename(zip_path)}")
+        logger.info(f"\U0001F9F9 Removed zip: {os.path.basename(zip_path)}")
     except Exception as e:
-        logger.warning(f"⚠️ Could not remove zip {zip_path}: {e}")
+        logger.warning(f"\u26A0\uFE0F Could not remove zip {zip_path}: {e}")
 
-def process_vfr_charts(metadata: Dict[str, Any]) -> Dict[str, Any]:
-    """Download and extract VFR Sectional & Terminal charts with progress bar and parallel downloads."""
+def is_vfr_chart_current(metadata, url):
+    """Check if a VFR chart (by url) is already current in metadata."""
+    fname = os.path.basename(url)
+    return metadata.get('vfr', {}).get(fname) is not None
+
+def is_ifr_chart_current(metadata, entry, chart_type):
+    """Check if an IFR chart (by entry) is already current in metadata."""
+    key = f"{entry['chart_code']}_{entry['published_date']}"
+    return metadata.get(chart_type, {}).get(key) is not None
+
+def process_vfr_charts(metadata: Dict[str, Any], check_current=False) -> Dict[str, Any]:
+    """Download and extract VFR Sectional & Terminal charts with progress bar and parallel downloads. Skips if current if check_current is True."""
     logger.info("🚩 Starting VFR Sectional & Terminal chart download...")
     vfr_links = fetch_vfr_sectional_and_terminal_links(VFR_CHARTS_URL)
     vfr_dir = os.path.join(DOWNLOAD_DIR, 'sectional')
     os.makedirs(vfr_dir, exist_ok=True)
-    to_download = [url for url in vfr_links if not metadata.get('vfr', {}).get(os.path.basename(url))]
+    to_download = []
+    for url in vfr_links:
+        if check_current and is_vfr_chart_current(metadata, url):
+            logger.info(f"⏩ Skipping current VFR chart: {os.path.basename(url)}")
+            continue
+        to_download.append(url)
     max_workers = min(4, os.cpu_count() or 1)
     def vfr_task(url):
         success, err = download_and_extract_single_vfr(url, metadata)
@@ -159,17 +201,21 @@ def process_vfr_charts(metadata: Dict[str, Any]) -> Dict[str, Any]:
     backup_and_save_metadata(metadata, METADATA_PATH)
     return metadata
 
-def process_ifr_charts(metadata: Dict[str, Any], chart_type: str, allowed_prefixes) -> Dict[str, Any]:
+def process_ifr_charts(metadata: Dict[str, Any], chart_type: str, allowed_prefixes, check_current=False) -> Dict[str, Any]:
     """
     Download and extract IFR Low or High charts with progress bar and parallel downloads.
-    chart_type: 'ifr_low' or 'ifr_high'
-    allowed_prefixes: list of chart code prefixes
+    Skips if current if check_current is True.
     """
     logger.info(f"🚩 Starting {chart_type.upper()} chart download...")
     links = fetch_ifr_low_high_links(IFR_CHARTS_URL, allowed_prefixes)
     out_dir = os.path.join(DOWNLOAD_DIR, chart_type)
     os.makedirs(out_dir, exist_ok=True)
-    to_download = [entry for entry in links if not metadata.get(chart_type, {}).get(f"{entry['chart_code']}_{entry['published_date']}")]
+    to_download = []
+    for entry in links:
+        if check_current and is_ifr_chart_current(metadata, entry, chart_type):
+            logger.info(f"⏩ Skipping current {chart_type} chart: {entry['chart_code']}_{entry['published_date']}")
+            continue
+        to_download.append(entry)
     max_workers = min(4, os.cpu_count() or 1)
     def ifr_task(entry):
         success, err = download_and_extract_single_ifr(entry, chart_type, metadata)
@@ -195,6 +241,7 @@ def print_summary(metadata):
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Download and extract FAA charts.")
     parser.add_argument('--chart-type', type=str, default=None, choices=['sectional', 'ifr_low', 'ifr_high'], help='Only process this chart type (for matrix jobs)')
+    parser.add_argument('--check-current', action='store_true', help='Skip download if chart is already current')
     return parser.parse_args()
 
 def main():
@@ -204,18 +251,18 @@ def main():
     args = parse_args()
     metadata = load_metadata()
     os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+    check_current = getattr(args, 'check_current', False)
     if args.chart_type:
         if args.chart_type == 'sectional':
-            metadata = process_vfr_charts(metadata)
+            metadata = process_vfr_charts(metadata, check_current=check_current)
         elif args.chart_type == 'ifr_low':
-            metadata = process_ifr_charts(metadata, 'ifr_low', IFR_LOW_PREFIXES)
+            metadata = process_ifr_charts(metadata, 'ifr_low', IFR_LOW_PREFIXES, check_current=check_current)
         elif args.chart_type == 'ifr_high':
-            metadata = process_ifr_charts(metadata, 'ifr_high', IFR_HIGH_PREFIXES)
+            metadata = process_ifr_charts(metadata, 'ifr_high', IFR_HIGH_PREFIXES, check_current=check_current)
     else:
-        # Process all chart types
-        metadata = process_vfr_charts(metadata)
-        metadata = process_ifr_charts(metadata, 'ifr_low', IFR_LOW_PREFIXES)
-        metadata = process_ifr_charts(metadata, 'ifr_high', IFR_HIGH_PREFIXES)
+        metadata = process_vfr_charts(metadata, check_current=check_current)
+        metadata = process_ifr_charts(metadata, 'ifr_low', IFR_LOW_PREFIXES, check_current=check_current)
+        metadata = process_ifr_charts(metadata, 'ifr_high', IFR_HIGH_PREFIXES, check_current=check_current)
     print_summary(metadata)
 
 def download_and_extract_single_vfr(url, metadata=None):

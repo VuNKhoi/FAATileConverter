@@ -55,7 +55,7 @@ jobs:
         run: pip install --no-cache-dir -r requirements.txt
 
       - name: Run download and unzip script
-        run: python scripts/download_faa_charts.py --chart-type ${{ matrix.chart_type }}
+        run: python scripts/download_faa_charts.py --chart-type ${{ matrix.chart_type }} --check-current
 
       - name: Convert all GeoTIFFs to tiles
         run: python scripts/convert_faa_charts.py --chart-type ${{ matrix.chart_type }}
@@ -67,7 +67,26 @@ jobs:
           chart_type=${{ matrix.chart_type }}
           if [ -d "downloads/$chart_type" ]; then
             echo "Uploading $chart_type to S3"
-            if aws s3 sync downloads/$chart_type s3://$S3_BUCKET/$chart_type --delete --only-show-errors --exclude "*" --include "*.png" || { echo "Retrying upload..."; sleep 10; aws s3 sync downloads/$chart_type s3://$S3_BUCKET/$chart_type --delete --only-show-errors --exclude "*" --include "*.png"; }; then
+            if aws s3 sync \
+              downloads/$chart_type \
+              s3://$S3_BUCKET/$chart_type \
+              --delete \
+              --only-show-errors \
+              --exclude "*" \
+              --include "*.png" \
+              --cache-control "public, max-age=31536000, immutable" \
+            || {
+              echo "Retrying upload...";
+              sleep 10;
+              aws s3 sync \
+                downloads/$chart_type \
+                s3://$S3_BUCKET/$chart_type \
+                --delete \
+                --only-show-errors \
+                --exclude "*" \
+                --include "*.png" \
+                --cache-control "public, max-age=31536000, immutable";
+            }; then
               echo "Successfully uploaded $chart_type to S3"
               echo "$chart_type uploaded" >> summary.txt
             else
