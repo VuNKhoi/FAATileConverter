@@ -93,7 +93,7 @@ jobs:
           TILE_DIR=$(find "$CHART_DIR" -type d -name '*_tiles' | head -n 1)
           if [ -d "$TILE_DIR" ]; then
             pip install boto3
-            python scripts/test_cache_control.py "$S3_BUCKET" "${{ matrix.chart_type }}/$(basename \"$TILE_DIR\")" "$TILE_DIR"
+            python scripts/check_s3_cache_control.py "$S3_BUCKET" "${{ matrix.chart_type }}/$(basename \"$TILE_DIR\")" "$TILE_DIR"
           else
             echo "No tile directory found for cache-control check."
           fi

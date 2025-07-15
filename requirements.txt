@@ -1,3 +1,5 @@
 requests
 beautifulsoup4
 tqdm
+boto3
+botocore
