@@ -24,7 +24,7 @@ jobs:
             chart_code: EHUS1
     env:
       AWS_DEFAULT_REGION: us-east-1
-      S3_BUCKET: faa-converted-charts-test
+      S3_BUCKET: faa-converted-charts
       CHART_TYPE: ${{ matrix.chart_type }}
     steps:
       - name: Checkout code
@@ -50,7 +50,7 @@ jobs:
 
       - name: Download and extract one chart (with current check)
         run: |
-          python scripts/faachart_minimal_e2e.py ${{ matrix.chart_type }} ${{ matrix.chart_code }} --check-current
+          PYTHONPATH=. python scripts/faachart_minimal_e2e.py ${{ matrix.chart_type }} ${{ matrix.chart_code }} --check-current
 
       - name: Find single TIFF for conversion
         id: find_tiff

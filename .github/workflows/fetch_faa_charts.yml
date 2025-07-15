@@ -60,6 +60,12 @@ jobs:
       - name: Convert all GeoTIFFs to tiles
         run: python scripts/convert_faa_charts.py --chart-type ${{ matrix.chart_type }}
 
+      - name: Delete old tiles from S3
+        run: |
+          chart_type=${{ matrix.chart_type }}
+          echo "Deleting old tiles for $chart_type from S3"
+          aws s3 rm s3://$S3_BUCKET/$chart_type --recursive --only-show-errors
+
       - name: Upload tiles to S3
         run: |
           set -euo pipefail
@@ -70,7 +76,6 @@ jobs:
             if aws s3 sync \
               downloads/$chart_type \
               s3://$S3_BUCKET/$chart_type \
-              --delete \
               --only-show-errors \
               --exclude "*" \
               --include "*.png" \
@@ -81,7 +86,6 @@ jobs:
               aws s3 sync \
                 downloads/$chart_type \
                 s3://$S3_BUCKET/$chart_type \
-                --delete \
                 --only-show-errors \
                 --exclude "*" \
                 --include "*.png" \
